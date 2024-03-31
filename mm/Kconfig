@@ -61,6 +61,14 @@ config SPARSEMEM_MANUAL
 
 endchoice
 
+config SHRINK_MEMORY
+	bool "Allow for system-wide shrinking of memory"
+	default n
+	depends on MMU
+	help
+	It ebable support for system-wide memory reclaim in one shot using
+	echo 1 > /proc/sys/vm/shrink_memory
+
 config DISCONTIGMEM
 	def_bool y
 	depends on (!SELECT_MEMORY_MODEL && ARCH_DISCONTIGMEM_ENABLE) || DISCONTIGMEM_MANUAL
@@ -636,6 +644,13 @@ config ZSMALLOC_STAT
 	  This option enables code in the zsmalloc to collect various
 	  statistics about whats happening in zsmalloc and exports that
 	  information to userspace via debugfs.
+	  If unsure, say N.
+
+config ZS_COMPACTION
+	bool "Is support zsmemory migrate"
+	depends on ZSMALLOC && COMPACTION
+	help
+	  This option enables the memory which alloc by zsmalloc is migrated.
 	  If unsure, say N.
 
 config GENERIC_EARLY_IOREMAP

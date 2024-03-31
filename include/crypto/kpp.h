@@ -74,12 +74,12 @@ struct crypto_kpp {
  * @base		Common crypto API algorithm data structure
  */
 struct kpp_alg {
-	int (*set_secret)(struct crypto_kpp *tfm, void *buffer,
+	int (*set_secret)(struct crypto_kpp *tfm, const void *buffer,
 			  unsigned int len);
 	int (*generate_public_key)(struct kpp_request *req);
 	int (*compute_shared_secret)(struct kpp_request *req);
 
-	int (*max_size)(struct crypto_kpp *tfm);
+	unsigned int (*max_size)(struct crypto_kpp *tfm);
 
 	int (*init)(struct crypto_kpp *tfm);
 	void (*exit)(struct crypto_kpp *tfm);
@@ -267,7 +267,7 @@ struct kpp_secret {
  *
  * Return: zero on success; error code in case of error
  */
-static inline int crypto_kpp_set_secret(struct crypto_kpp *tfm, void *buffer,
+static inline int crypto_kpp_set_secret(struct crypto_kpp *tfm, const void *buffer,
 					unsigned int len)
 {
 	struct kpp_alg *alg = crypto_kpp_alg(tfm);
@@ -320,7 +320,7 @@ static inline int crypto_kpp_compute_shared_secret(struct kpp_request *req)
  *
  * Return: minimum len for output buffer or error code if key hasn't been set
  */
-static inline int crypto_kpp_maxsize(struct crypto_kpp *tfm)
+static inline unsigned int crypto_kpp_maxsize(struct crypto_kpp *tfm)
 {
 	struct kpp_alg *alg = crypto_kpp_alg(tfm);
 

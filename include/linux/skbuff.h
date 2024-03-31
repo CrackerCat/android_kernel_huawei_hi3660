@@ -659,8 +659,11 @@ struct sk_buff {
 	 * want to keep them across layers you have to do a skb_clone()
 	 * first. This is owned by whoever has the skb queued ATM.
 	 */
+#ifdef CONFIG_MPTCP
+	char			cb[80] __aligned(8);
+#else
 	char			cb[48] __aligned(8);
-
+#endif
 	unsigned long		_skb_refdst;
 	void			(*destructor)(struct sk_buff *skb);
 #ifdef CONFIG_XFRM
@@ -1178,8 +1181,7 @@ static inline __u32 skb_get_hash_flowi4(struct sk_buff *skb, const struct flowi4
 	return skb->hash;
 }
 
-__u32 skb_get_hash_perturb(const struct sk_buff *skb,
-			   const siphash_key_t *perturb);
+__u32 skb_get_hash_perturb(const struct sk_buff *skb, const siphash_key_t *perturb);
 
 static inline __u32 skb_get_hash_raw(const struct sk_buff *skb)
 {

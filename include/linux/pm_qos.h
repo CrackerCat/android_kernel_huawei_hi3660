@@ -16,7 +16,11 @@ enum {
 	PM_QOS_NETWORK_LATENCY,
 	PM_QOS_NETWORK_THROUGHPUT,
 	PM_QOS_MEMORY_BANDWIDTH,
-
+#ifdef CONFIG_DEVFREQ_GOV_PM_QOS
+	PM_QOS_MEMORY_LATENCY,
+	PM_QOS_MEMORY_THROUGHPUT,
+	PM_QOS_MEMORY_THROUGHPUT_UP_THRESHOLD,
+#endif
 	/* insert new class ID */
 	PM_QOS_NUM_CLASSES,
 };
@@ -34,6 +38,12 @@ enum pm_qos_flags_status {
 #define PM_QOS_NETWORK_LAT_DEFAULT_VALUE	(2000 * USEC_PER_SEC)
 #define PM_QOS_NETWORK_THROUGHPUT_DEFAULT_VALUE	0
 #define PM_QOS_MEMORY_BANDWIDTH_DEFAULT_VALUE	0
+
+#ifdef CONFIG_DEVFREQ_GOV_PM_QOS
+#define PM_QOS_MEMORY_LATENCY_DEFAULT_VALUE	0
+#define PM_QOS_MEMORY_THROUGHPUT_DEFAULT_VALUE	0
+#define PM_QOS_MEMORY_THROUGHPUT_UP_THRESHOLD_DEFAULT_VALUE	30000
+#endif
 #define PM_QOS_RESUME_LATENCY_DEFAULT_VALUE	0
 #define PM_QOS_LATENCY_TOLERANCE_DEFAULT_VALUE	0
 #define PM_QOS_LATENCY_TOLERANCE_NO_CONSTRAINT	(-1)
@@ -173,6 +183,11 @@ static inline s32 dev_pm_qos_requested_flags(struct device *dev)
 {
 	return dev->power.qos->flags_req->data.flr.flags;
 }
+static inline s32 dev_pm_qos_raw_read_value(struct device *dev)
+{
+	return IS_ERR_OR_NULL(dev->power.qos) ?
+		0 : pm_qos_read_value(&dev->power.qos->resume_latency);
+}
 #else
 static inline enum pm_qos_flags_status __dev_pm_qos_flags(struct device *dev,
 							  s32 mask)
@@ -237,6 +252,7 @@ static inline void dev_pm_qos_hide_latency_tolerance(struct device *dev) {}
 
 static inline s32 dev_pm_qos_requested_resume_latency(struct device *dev) { return 0; }
 static inline s32 dev_pm_qos_requested_flags(struct device *dev) { return 0; }
+static inline s32 dev_pm_qos_raw_read_value(struct device *dev) { return 0; }
 #endif
 
 #endif

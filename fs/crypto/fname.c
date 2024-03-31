@@ -12,50 +12,47 @@
 
 #include <linux/scatterlist.h>
 #include <linux/ratelimit.h>
-#include <crypto/skcipher.h>
 #include "fscrypt_private.h"
-
-static inline bool fscrypt_is_dot_dotdot(const struct qstr *str)
-{
-	if (str->len == 1 && str->name[0] == '.')
-		return true;
-
-	if (str->len == 2 && str->name[0] == '.' && str->name[1] == '.')
-		return true;
-
-	return false;
-}
 
 /**
  * fname_encrypt() - encrypt a filename
  *
- * The output buffer must be at least as large as the input buffer.
- * Any extra space is filled with NUL padding before encryption.
+ * The caller must have allocated sufficient memory for the @oname string.
  *
  * Return: 0 on success, -errno on failure
  */
-int fname_encrypt(struct inode *inode, const struct qstr *iname,
-		  u8 *out, unsigned int olen)
+int fname_encrypt(struct inode *inode,
+		  const struct qstr *iname, struct fscrypt_str *oname)
 {
 	struct skcipher_request *req = NULL;
 	DECLARE_CRYPTO_WAIT(wait);
 	struct fscrypt_info *ci = inode->i_crypt_info;
 	struct crypto_skcipher *tfm = ci->ci_ctfm;
-	union fscrypt_iv iv;
+	int res = 0;
+	char iv[FS_CRYPTO_BLOCK_SIZE];
 	struct scatterlist sg;
-	int res;
+	int padding = 4 << (ci->ci_flags & FS_POLICY_FLAGS_PAD_MASK);
+	unsigned int lim;
+	unsigned int cryptlen;
+
+	lim = inode->i_sb->s_cop->max_namelen(inode);
+	if (iname->len <= 0 || iname->len > lim)
+		return -EIO;
 
 	/*
 	 * Copy the filename to the output buffer for encrypting in-place and
 	 * pad it with the needed number of NUL bytes.
 	 */
-	if (WARN_ON(olen < iname->len))
+	if (WARN_ON(oname->len < iname->len))
 		return -ENOBUFS;
-	memcpy(out, iname->name, iname->len);
-	memset(out + iname->len, 0, olen - iname->len);
+	cryptlen = max_t(unsigned int, iname->len, FS_CRYPTO_BLOCK_SIZE);
+	cryptlen = round_up(cryptlen, padding);
+	cryptlen = min3(cryptlen, lim, oname->len);
+	memcpy(oname->name, iname->name, iname->len);
+	memset(oname->name + iname->len, 0, cryptlen - iname->len);
 
 	/* Initialize the IV */
-	fscrypt_generate_iv(&iv, 0, ci);
+	memset(iv, 0, FS_CRYPTO_BLOCK_SIZE);
 
 	/* Set up the encryption request */
 	req = skcipher_request_alloc(tfm, GFP_NOFS);
@@ -64,19 +61,19 @@ int fname_encrypt(struct inode *inode, const struct qstr *iname,
 	skcipher_request_set_callback(req,
 			CRYPTO_TFM_REQ_MAY_BACKLOG | CRYPTO_TFM_REQ_MAY_SLEEP,
 			crypto_req_done, &wait);
-	sg_init_one(&sg, out, olen);
-	skcipher_request_set_crypt(req, &sg, &sg, olen, &iv);
+	sg_init_one(&sg, oname->name, cryptlen);
+	skcipher_request_set_crypt(req, &sg, &sg, cryptlen, iv);
 
 	/* Do the encryption */
 	res = crypto_wait_req(crypto_skcipher_encrypt(req), &wait);
 	skcipher_request_free(req);
 	if (res < 0) {
-		fscrypt_err(inode->i_sb,
-			    "Filename encryption failed for inode %lu: %d",
-			    inode->i_ino, res);
+		printk_ratelimited(KERN_ERR
+				"%s: Error (error code %d)\n", __func__, res);
 		return res;
 	}
 
+	oname->len = cryptlen;
 	return 0;
 }
 
@@ -94,10 +91,9 @@ static int fname_decrypt(struct inode *inode,
 	struct skcipher_request *req = NULL;
 	DECLARE_CRYPTO_WAIT(wait);
 	struct scatterlist src_sg, dst_sg;
-	struct fscrypt_info *ci = inode->i_crypt_info;
-	struct crypto_skcipher *tfm = ci->ci_ctfm;
-	union fscrypt_iv iv;
-	int res;
+	struct crypto_skcipher *tfm = inode->i_crypt_info->ci_ctfm;
+	int res = 0;
+	char iv[FS_CRYPTO_BLOCK_SIZE];
 
 	/* Allocate request */
 	req = skcipher_request_alloc(tfm, GFP_NOFS);
@@ -108,18 +104,17 @@ static int fname_decrypt(struct inode *inode,
 		crypto_req_done, &wait);
 
 	/* Initialize IV */
-	fscrypt_generate_iv(&iv, 0, ci);
+	memset(iv, 0, FS_CRYPTO_BLOCK_SIZE);
 
 	/* Create decryption request */
 	sg_init_one(&src_sg, iname->name, iname->len);
 	sg_init_one(&dst_sg, oname->name, oname->len);
-	skcipher_request_set_crypt(req, &src_sg, &dst_sg, iname->len, &iv);
+	skcipher_request_set_crypt(req, &src_sg, &dst_sg, iname->len, iv);
 	res = crypto_wait_req(crypto_skcipher_decrypt(req), &wait);
 	skcipher_request_free(req);
 	if (res < 0) {
-		fscrypt_err(inode->i_sb,
-			    "Filename decryption failed for inode %lu: %d",
-			    inode->i_ino, res);
+		printk_ratelimited(KERN_ERR
+				"%s: Error (error code %d)\n", __func__, res);
 		return res;
 	}
 
@@ -182,52 +177,50 @@ static int digest_decode(const char *src, int len, char *dst)
 	return cp - dst;
 }
 
-bool fscrypt_fname_encrypted_size(const struct inode *inode, u32 orig_len,
-				  u32 max_len, u32 *encrypted_len_ret)
+u32 fscrypt_fname_encrypted_size(const struct inode *inode, u32 ilen)
 {
-	int padding = 4 << (inode->i_crypt_info->ci_flags &
-			    FS_POLICY_FLAGS_PAD_MASK);
-	u32 encrypted_len;
+	int padding = 32;
+	struct fscrypt_info *ci = inode->i_crypt_info;
 
-	if (orig_len > max_len)
-		return false;
-	encrypted_len = max(orig_len, (u32)FS_CRYPTO_BLOCK_SIZE);
-	encrypted_len = round_up(encrypted_len, padding);
-	*encrypted_len_ret = min(encrypted_len, max_len);
-	return true;
+	if (ci)
+		padding = 4 << (ci->ci_flags & FS_POLICY_FLAGS_PAD_MASK);
+	ilen = max(ilen, (u32)FS_CRYPTO_BLOCK_SIZE);
+	return round_up(ilen, padding);
 }
+EXPORT_SYMBOL(fscrypt_fname_encrypted_size);
 
 /**
- * fscrypt_fname_alloc_buffer - allocate a buffer for presented filenames
+ * fscrypt_fname_crypto_alloc_obuff() -
  *
- * Allocate a buffer that is large enough to hold any decrypted or encoded
- * filename (null-terminated), for the given maximum encrypted filename length.
- *
- * Return: 0 on success, -errno on failure
+ * Allocates an output buffer that is sufficient for the crypto operation
+ * specified by the context and the direction.
  */
 int fscrypt_fname_alloc_buffer(const struct inode *inode,
-			       u32 max_encrypted_len,
-			       struct fscrypt_str *crypto_str)
+				u32 ilen, struct fscrypt_str *crypto_str)
 {
+	u32 olen = fscrypt_fname_encrypted_size(inode, ilen);
 	const u32 max_encoded_len =
 		max_t(u32, BASE64_CHARS(FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE),
 		      1 + BASE64_CHARS(sizeof(struct fscrypt_digested_name)));
-	u32 max_presented_len;
 
-	max_presented_len = max(max_encoded_len, max_encrypted_len);
+	crypto_str->len = olen;
+	olen = max(olen, max_encoded_len);
 
-	crypto_str->name = kmalloc(max_presented_len + 1, GFP_NOFS);
-	if (!crypto_str->name)
+	/*
+	 * Allocated buffer can hold one more character to null-terminate the
+	 * string
+	 */
+	crypto_str->name = kmalloc(olen + 1, GFP_NOFS);
+	if (!(crypto_str->name))
 		return -ENOMEM;
-	crypto_str->len = max_presented_len;
 	return 0;
 }
 EXPORT_SYMBOL(fscrypt_fname_alloc_buffer);
 
 /**
- * fscrypt_fname_free_buffer - free the buffer for presented filenames
+ * fscrypt_fname_crypto_free_buffer() -
  *
- * Free the buffer allocated by fscrypt_fname_alloc_buffer().
+ * Frees the buffer allocated for crypto operation.
  */
 void fscrypt_fname_free_buffer(struct fscrypt_str *crypto_str)
 {
@@ -268,7 +261,8 @@ int fscrypt_fname_disk_to_usr(struct inode *inode,
 	if (iname->len < FS_CRYPTO_BLOCK_SIZE)
 		return -EUCLEAN;
 
-	if (inode->i_crypt_info)
+	if (inode->i_crypt_info &&
+			!inode->i_sb->s_cop->is_encrypted_fixed(inode))
 		return fname_decrypt(inode, iname, oname);
 
 	if (iname->len <= FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE) {
@@ -292,6 +286,35 @@ int fscrypt_fname_disk_to_usr(struct inode *inode,
 	return 0;
 }
 EXPORT_SYMBOL(fscrypt_fname_disk_to_usr);
+
+/**
+ * fscrypt_fname_usr_to_disk() - converts a filename from user space to disk
+ * space
+ *
+ * The caller must have allocated sufficient memory for the @oname string.
+ *
+ * Return: 0 on success, -errno on failure
+ */
+int fscrypt_fname_usr_to_disk(struct inode *inode,
+			const struct qstr *iname,
+			struct fscrypt_str *oname)
+{
+	if (fscrypt_is_dot_dotdot(iname)) {
+		oname->name[0] = '.';
+		oname->name[iname->len - 1] = '.';
+		oname->len = iname->len;
+		return 0;
+	}
+	if (inode->i_crypt_info)
+		return fname_encrypt(inode, iname, oname);
+	/*
+	 * Without a proper key, a user is not allowed to modify the filenames
+	 * in a directory. Consequently, a user space name cannot be mapped to
+	 * a disk-space name
+	 */
+	return -ENOKEY;
+}
+EXPORT_SYMBOL(fscrypt_fname_usr_to_disk);
 
 /**
  * fscrypt_setup_filename() - prepare to search a possibly encrypted directory
@@ -335,18 +358,12 @@ int fscrypt_setup_filename(struct inode *dir, const struct qstr *iname,
 	if (ret)
 		return ret;
 
-	if (dir->i_crypt_info) {
-		if (!fscrypt_fname_encrypted_size(dir, iname->len,
-						  dir->i_sb->s_cop->max_namelen,
-						  &fname->crypto_buf.len))
-			return -ENAMETOOLONG;
-		fname->crypto_buf.name = kmalloc(fname->crypto_buf.len,
-						 GFP_NOFS);
-		if (!fname->crypto_buf.name)
-			return -ENOMEM;
-
-		ret = fname_encrypt(dir, iname, fname->crypto_buf.name,
-				    fname->crypto_buf.len);
+	if (dir->i_crypt_info && !dir->i_sb->s_cop->is_encrypted_fixed(dir)) {
+		ret = fscrypt_fname_alloc_buffer(dir, iname->len,
+							&fname->crypto_buf);
+		if (ret)
+			return ret;
+		ret = fname_encrypt(dir, iname, &fname->crypto_buf);
 		if (ret)
 			goto errout;
 		fname->disk_name.name = fname->crypto_buf.name;
@@ -398,7 +415,7 @@ int fscrypt_setup_filename(struct inode *dir, const struct qstr *iname,
 	return 0;
 
 errout:
-	kfree(fname->crypto_buf.name);
+	fscrypt_fname_free_buffer(&fname->crypto_buf);
 	return ret;
 }
 EXPORT_SYMBOL(fscrypt_setup_filename);

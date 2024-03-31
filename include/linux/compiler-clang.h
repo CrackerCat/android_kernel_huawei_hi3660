@@ -24,6 +24,9 @@
 #undef __noretpoline
 #endif
 
+#define randomized_struct_fields_start	struct {
+#define randomized_struct_fields_end	};
+
 #ifdef CONFIG_LTO_CLANG
 #ifdef CONFIG_FTRACE_MCOUNT_RECORD
 #define __norecordmcount \

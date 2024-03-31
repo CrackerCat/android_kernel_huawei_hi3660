@@ -1,3 +1,14 @@
+ifeq ($(CONFIG_HI6402_MBHC_ANC),y)
+EXTRA_CFLAGS +=	-DANC_HEADSET
+endif
+EXTRA_CFLAGS += -I$(src)/hisi/hs_auto_calib/
+EXTRA_CFLAGS += -Idrivers/hisi/hi64xx_dsp/
+EXTRA_CFLAGS +=	-Idrivers/hisi/slimbus/
+
+ifeq ($(TARGET_VERSION_MODE),factory)
+EXTRA_CFLAGS += -DAUDIO_FACTORY_MODE
+endif
+
 snd-soc-88pm860x-objs := 88pm860x-codec.o
 snd-soc-ab8500-codec-objs := ab8500-codec.o
 snd-soc-ac97-objs := ac97.o

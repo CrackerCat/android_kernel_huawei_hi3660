@@ -7,7 +7,10 @@
  * (C) 2007 SGI, Christoph Lameter
  */
 #include <linux/kobject.h>
-
+#include <linux/mm.h>
+#ifdef CONFIG_KASAN
+#include <linux/kasan.h>
+#endif
 enum stat_item {
 	ALLOC_FASTPATH,		/* Allocation from cpu slab */
 	ALLOC_SLOWPATH,		/* Allocation by getting a new cpu slab */
@@ -136,5 +139,9 @@ static inline void *nearest_obj(struct kmem_cache *cache, struct page *page,
 	result = fixup_red_left(cache, result);
 	return result;
 }
+
+#ifdef CONFIG_SLABINFO
+void show_slab(bool verbose);
+#endif
 
 #endif /* _LINUX_SLUB_DEF_H */

@@ -39,9 +39,8 @@ int fscrypt_file_open(struct inode *inode, struct file *filp)
 	dir = dget_parent(file_dentry(filp));
 	if (IS_ENCRYPTED(d_inode(dir)) &&
 	    !fscrypt_has_permitted_context(d_inode(dir), inode)) {
-		fscrypt_warn(inode->i_sb,
-			     "inconsistent encryption contexts: %lu/%lu",
-			     d_inode(dir)->i_ino, inode->i_ino);
+		pr_warn_ratelimited("fscrypt: inconsistent encryption contexts: %lu/%lu",
+				    d_inode(dir)->i_ino, inode->i_ino);
 		err = -EPERM;
 	}
 	dput(dir);
@@ -144,12 +143,12 @@ int __fscrypt_prepare_symlink(struct inode *dir, unsigned int len,
 	 * counting it (even though it is meaningless for ciphertext) is simpler
 	 * for now since filesystems will assume it is there and subtract it.
 	 */
-	if (!fscrypt_fname_encrypted_size(dir, len,
-					  max_len - sizeof(struct fscrypt_symlink_data),
-					  &disk_link->len))
+	if (sizeof(struct fscrypt_symlink_data) + len > max_len)
 		return -ENAMETOOLONG;
-	disk_link->len += sizeof(struct fscrypt_symlink_data);
-
+	disk_link->len = min_t(unsigned int,
+			       sizeof(struct fscrypt_symlink_data) +
+					fscrypt_fname_encrypted_size(dir, len),
+			       max_len);
 	disk_link->name = NULL;
 	return 0;
 }
@@ -159,9 +158,10 @@ int __fscrypt_encrypt_symlink(struct inode *inode, const char *target,
 			      unsigned int len, struct fscrypt_str *disk_link)
 {
 	int err;
-	struct qstr iname = QSTR_INIT(target, len);
+	struct qstr iname = { .name = target, .len = len };
 	struct fscrypt_symlink_data *sd;
 	unsigned int ciphertext_len;
+	struct fscrypt_str oname;
 
 	err = fscrypt_require_key(inode);
 	if (err)
@@ -178,12 +178,16 @@ int __fscrypt_encrypt_symlink(struct inode *inode, const char *target,
 	ciphertext_len = disk_link->len - sizeof(*sd);
 	sd->len = cpu_to_le16(ciphertext_len);
 
-	err = fname_encrypt(inode, &iname, sd->encrypted_path, ciphertext_len);
+	oname.name = sd->encrypted_path;
+	oname.len = ciphertext_len;
+	err = fname_encrypt(inode, &iname, &oname);
 	if (err) {
 		if (!disk_link->name)
 			kfree(sd);
 		return err;
 	}
+	BUG_ON(oname.len != ciphertext_len);
+
 	/*
 	 * Null-terminating the ciphertext doesn't make sense, but we still
 	 * count the null terminator in the length, so we might as well
@@ -196,76 +200,3 @@ int __fscrypt_encrypt_symlink(struct inode *inode, const char *target,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(__fscrypt_encrypt_symlink);
-
-/**
- * fscrypt_get_symlink - get the target of an encrypted symlink
- * @inode: the symlink inode
- * @caddr: the on-disk contents of the symlink
- * @max_size: size of @caddr buffer
- * @done: if successful, will be set up to free the returned target
- *
- * If the symlink's encryption key is available, we decrypt its target.
- * Otherwise, we encode its target for presentation.
- *
- * This may sleep, so the filesystem must have dropped out of RCU mode already.
- *
- * Return: the presentable symlink target or an ERR_PTR()
- */
-const char *fscrypt_get_symlink(struct inode *inode, const void *caddr,
-				unsigned int max_size,
-				struct delayed_call *done)
-{
-	const struct fscrypt_symlink_data *sd;
-	struct fscrypt_str cstr, pstr;
-	int err;
-
-	/* This is for encrypted symlinks only */
-	if (WARN_ON(!IS_ENCRYPTED(inode)))
-		return ERR_PTR(-EINVAL);
-
-	/*
-	 * Try to set up the symlink's encryption key, but we can continue
-	 * regardless of whether the key is available or not.
-	 */
-	err = fscrypt_get_encryption_info(inode);
-	if (err)
-		return ERR_PTR(err);
-
-	/*
-	 * For historical reasons, encrypted symlink targets are prefixed with
-	 * the ciphertext length, even though this is redundant with i_size.
-	 */
-
-	if (max_size < sizeof(*sd))
-		return ERR_PTR(-EUCLEAN);
-	sd = caddr;
-	cstr.name = (unsigned char *)sd->encrypted_path;
-	cstr.len = le16_to_cpu(sd->len);
-
-	if (cstr.len == 0)
-		return ERR_PTR(-EUCLEAN);
-
-	if (cstr.len + sizeof(*sd) - 1 > max_size)
-		return ERR_PTR(-EUCLEAN);
-
-	err = fscrypt_fname_alloc_buffer(inode, cstr.len, &pstr);
-	if (err)
-		return ERR_PTR(err);
-
-	err = fscrypt_fname_disk_to_usr(inode, 0, 0, &cstr, &pstr);
-	if (err)
-		goto err_kfree;
-
-	err = -EUCLEAN;
-	if (pstr.name[0] == '\0')
-		goto err_kfree;
-
-	pstr.name[pstr.len] = '\0';
-	set_delayed_call(done, kfree_link, pstr.name);
-	return pstr.name;
-
-err_kfree:
-	kfree(pstr.name);
-	return ERR_PTR(err);
-}
-EXPORT_SYMBOL_GPL(fscrypt_get_symlink);

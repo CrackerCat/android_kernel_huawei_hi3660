@@ -76,6 +76,10 @@ static struct vfsmount *shm_mnt;
 
 #include "internal.h"
 
+#ifdef CONFIG_HW_MEMORY_MONITOR
+#include <chipset_common/mmonitor/mmonitor.h>
+#endif
+
 #define BLOCKS_PER_PAGE  (PAGE_SIZE/512)
 #define VM_ACCT(size)    (PAGE_ALIGN(size) >> PAGE_SHIFT)
 
@@ -1494,13 +1498,11 @@ static int shmem_replace_page(struct page **pagep, gfp_t gfp,
 {
 	struct page *oldpage, *newpage;
 	struct address_space *swap_mapping;
-	swp_entry_t entry;
 	pgoff_t swap_index;
 	int error;
 
 	oldpage = *pagep;
-	entry.val = page_private(oldpage);
-	swap_index = swp_offset(entry);
+	swap_index = page_private(oldpage);
 	swap_mapping = page_mapping(oldpage);
 
 	/*
@@ -1519,7 +1521,7 @@ static int shmem_replace_page(struct page **pagep, gfp_t gfp,
 	__SetPageLocked(newpage);
 	__SetPageSwapBacked(newpage);
 	SetPageUptodate(newpage);
-	set_page_private(newpage, entry.val);
+	set_page_private(newpage, swap_index);
 	SetPageSwapCache(newpage);
 
 	/*
@@ -1628,6 +1630,9 @@ repeat:
 	if (swap.val) {
 		/* Look it up and read it in.. */
 		page = lookup_swap_cache(swap);
+#ifdef CONFIG_HW_MEMORY_MONITOR
+		count_mmonitor_event(FILE_CACHE_MAP_COUNT);
+#endif
 		if (!page) {
 			/* Or update major stats only when swapin succeeds?? */
 			if (fault_type) {

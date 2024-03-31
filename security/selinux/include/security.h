@@ -12,6 +12,7 @@
 #include <linux/dcache.h>
 #include <linux/magic.h>
 #include <linux/types.h>
+#include <linux/pmalloc.h>
 #include "flask.h"
 
 #define SECSID_NULL			0x00000000 /* unspecified SID */
@@ -61,9 +62,13 @@
 #define DEFCONTEXT_STR	"defcontext="
 #define LABELSUPP_STR "seclabel"
 
+#define HISI_SELINUX_PROT
+
 struct netlbl_lsm_secattr;
 
 extern int selinux_enabled;
+
+extern struct gen_pool *selinux_pool;
 
 /* Policy capabilities */
 enum {

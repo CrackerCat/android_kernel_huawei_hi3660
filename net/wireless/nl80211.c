@@ -446,6 +446,7 @@ static const struct nla_policy nl80211_policy[NUM_NL80211_ATTR] = {
 	[NL80211_ATTR_NAN_DUAL] = { .type = NLA_U8 },
 	[NL80211_ATTR_NAN_FUNC] = { .type = NLA_NESTED },
 	[NL80211_ATTR_BSSID] = { .len = ETH_ALEN },
+	[NL80211_ATTR_DFS_OFFLOAD_SUPPORT] = { .type = NLA_FLAG },
 };
 
 /* policy for the key attributes */
@@ -1427,6 +1428,9 @@ static int nl80211_send_wiphy(struct cfg80211_registered_device *rdev,
 			goto nla_put_failure;
 		if ((rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_FW_ROAM) &&
 		    nla_put_flag(msg, NL80211_ATTR_ROAM_SUPPORT))
+			goto nla_put_failure;
+		if ((rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_DFS_OFFLOAD) &&
+		    nla_put_flag(msg, NL80211_ATTR_DFS_OFFLOAD_SUPPORT))
 			goto nla_put_failure;
 		if ((rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_TDLS) &&
 		    nla_put_flag(msg, NL80211_ATTR_TDLS_SUPPORT))
@@ -4332,6 +4336,25 @@ static int nl80211_send_station(struct sk_buff *msg, u32 cmd, u32 portid,
 		    &sinfo->sta_flags))
 		goto nla_put_failure;
 
+#ifdef CONFIG_HW_GET_EXT_SIG
+	if ((sinfo->filled & BIT(NL80211_STA_INFO_NOISE))) {
+		if (nla_put_s32(msg, NL80211_STA_INFO_NOISE, sinfo->noise)) {
+			goto nla_put_failure;
+		}
+	}
+
+	if ((sinfo->filled & BIT(NL80211_STA_INFO_SNR))) {
+		if (nla_put_s32(msg, NL80211_STA_INFO_SNR, sinfo->snr)) {
+			goto nla_put_failure;
+		}
+	}
+
+	if ((sinfo->filled & BIT(NL80211_STA_INFO_CNAHLOAD))) {
+		if (nla_put_s32(msg, NL80211_STA_INFO_CNAHLOAD, sinfo->chload)) {
+			goto nla_put_failure;
+		}
+	}
+#endif
 	PUT_SINFO_U64(T_OFFSET, t_offset);
 	PUT_SINFO_U64(RX_DROP_MISC, rx_dropped_misc);
 	PUT_SINFO_U64(BEACON_RX, rx_beacon);
@@ -5894,9 +5917,22 @@ do {									    \
 				  IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
 			return -EINVAL;
 
-		/* NON_HT_STA bit is reserved, but some programs set it */
-		ht_opmode &= ~IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT;
+		if ((ht_opmode & IEEE80211_HT_OP_MODE_NON_GF_STA_PRSNT) &&
+		    (ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
+			return -EINVAL;
 
+		switch (ht_opmode & IEEE80211_HT_OP_MODE_PROTECTION) {
+		case IEEE80211_HT_OP_MODE_PROTECTION_NONE:
+		case IEEE80211_HT_OP_MODE_PROTECTION_20MHZ:
+			if (ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT)
+				return -EINVAL;
+			break;
+		case IEEE80211_HT_OP_MODE_PROTECTION_NONMEMBER:
+		case IEEE80211_HT_OP_MODE_PROTECTION_NONHT_MIXED:
+			if (!(ht_opmode & IEEE80211_HT_OP_MODE_NON_HT_STA_PRSNT))
+				return -EINVAL;
+			break;
+		}
 		cfg->ht_opmode = ht_opmode;
 		mask |= (1 << (NL80211_MESHCONF_HT_OPMODE - 1));
 	}
@@ -7747,6 +7783,10 @@ static int nl80211_dump_survey(struct sk_buff *skb, struct netlink_callback *cb)
 static bool nl80211_valid_wpa_versions(u32 wpa_versions)
 {
 	return !(wpa_versions & ~(NL80211_WPA_VERSION_1 |
+#if defined (CONFIG_BCMDHD) || defined (CONFIG_CONNECTIVITY_HI110X)
+/*WAPI*/
+				NL80211_WAPI_VERSION_1 |
+#endif
 				  NL80211_WPA_VERSION_2));
 }
 
@@ -11184,7 +11224,6 @@ static int nl80211_update_ft_ies(struct sk_buff *skb, struct genl_info *info)
 		return -EOPNOTSUPP;
 
 	if (!info->attrs[NL80211_ATTR_MDID] ||
-	    !info->attrs[NL80211_ATTR_IE] ||
 	    !is_valid_ie_attr(info->attrs[NL80211_ATTR_IE]))
 		return -EINVAL;
 
@@ -13566,6 +13605,74 @@ void cfg80211_conn_failed(struct net_device *dev, const u8 *mac_addr,
 	nlmsg_free(msg);
 }
 EXPORT_SYMBOL(cfg80211_conn_failed);
+
+#if (defined (CONFIG_HW_VOWIFI) || defined (CONFIG_HW_ABS))
+void cfg80211_do_drv_private(struct net_device *dev, gfp_t gfp, enum nl80211_commands command)
+{
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wdev->wiphy);
+	struct sk_buff *msg;
+	void *hdr;
+
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, gfp);
+	if (!msg)
+		return;
+
+	hdr = nl80211hdr_put(msg, 0, 0, 0, command);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return;
+	}
+    if (nla_put_u32(msg, NL80211_ATTR_IFINDEX, dev->ifindex))
+		goto nla_put_failure;
+
+	genlmsg_end(msg, hdr);
+	genlmsg_multicast_netns(&nl80211_fam, wiphy_net(&rdev->wiphy), msg, 0,
+				NL80211_MCGRP_REGULATORY, gfp);
+	return;
+
+ nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+}
+EXPORT_SYMBOL(cfg80211_do_drv_private);
+#endif
+
+#if (defined (CONFIG_HW_WIFI_MSS) || defined (CONFIG_HW_WIFI_RSSI))
+void cfg80211_do_drv_private_params(struct net_device *dev, gfp_t gfp,
+				enum nl80211_commands command, u32 subcmd, const u8 *ie, size_t ie_len)
+{
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wdev->wiphy);
+	struct sk_buff *msg;
+	void *hdr;
+
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, gfp);
+	if (!msg)
+		return;
+
+	hdr = nl80211hdr_put(msg, 0, 0, 0, command);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return;
+	}
+	if (nla_put_u32(msg, NL80211_ATTR_IFINDEX, dev->ifindex))
+		goto nla_put_failure;
+	if (nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, subcmd))
+		goto nla_put_failure;
+	if (ie && nla_put(msg, NL80211_ATTR_RESP_IE, ie_len, ie))
+		goto nla_put_failure;
+	genlmsg_end(msg, hdr);
+	genlmsg_multicast_netns(&nl80211_fam, wiphy_net(&rdev->wiphy), msg, 0,
+				NL80211_MCGRP_REGULATORY, gfp);
+	return;
+
+ nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+}
+EXPORT_SYMBOL(cfg80211_do_drv_private_params);
+#endif
 
 static bool __nl80211_unexpected_frame(struct net_device *dev, u8 cmd,
 				       const u8 *addr, gfp_t gfp)

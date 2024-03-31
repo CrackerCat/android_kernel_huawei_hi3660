@@ -246,6 +246,13 @@ static struct {
 #define cpuhp_lock_acquire()      lock_map_acquire(&cpu_hotplug.dep_map)
 #define cpuhp_lock_release()      lock_map_release(&cpu_hotplug.dep_map)
 
+#ifdef CONFIG_ARCH_HISI
+void cpu_hotplug_lock_held(void)
+{
+	lockdep_assert_held(&cpu_hotplug.lock);
+}
+EXPORT_SYMBOL(cpu_hotplug_lock_held);
+#endif
 
 void get_online_cpus(void)
 {
@@ -907,6 +914,7 @@ static int takedown_cpu(unsigned int cpu)
 
 	/* Park the smpboot threads */
 	kthread_park(per_cpu_ptr(&cpuhp_state, cpu)->thread);
+	smpboot_park_threads(cpu);
 
 	/*
 	 * Prevent irq alloc/free while the dying cpu reorganizes the
@@ -1193,6 +1201,7 @@ static int do_cpu_up(unsigned int cpu, enum cpuhp_state target)
 	}
 
 	err = _cpu_up(cpu, 0, target);
+
 out:
 	cpu_maps_update_done();
 	return err;
@@ -1489,7 +1498,7 @@ static struct cpuhp_step cpuhp_ap_states[] = {
 	[CPUHP_AP_SMPBOOT_THREADS] = {
 		.name			= "smpboot/threads:online",
 		.startup.single		= smpboot_unpark_threads,
-		.teardown.single	= smpboot_park_threads,
+		.teardown.single	= NULL,
 	},
 	[CPUHP_AP_PERF_ONLINE] = {
 		.name			= "perf:online",

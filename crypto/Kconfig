@@ -1752,6 +1752,13 @@ config CRYPTO_USER_API_AEAD
 config CRYPTO_HASH_INFO
 	bool
 
+config HIDE_SHA_CAP
+	bool "boringssl support"
+	default n
+	help
+	  This feature enables support for boringssl support. If you say Y
+	  here, the kernel will to support sha1 sha2.
+
 source "drivers/crypto/Kconfig"
 source crypto/asymmetric_keys/Kconfig
 source certs/Kconfig

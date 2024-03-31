@@ -193,7 +193,7 @@ void blk_queue_bounce_limit(struct request_queue *q, u64 max_addr)
 	int dma = 0;
 
 	q->bounce_gfp = GFP_NOIO;
-#if BITS_PER_LONG == 64
+#ifdef CONFIG_MMC_BLOCK_IOMMU_64BIT
 	/*
 	 * Assume anything <= 4GB can be handled by IOMMU.  Actually
 	 * some IOMMUs can handle everything, but I don't know of a
@@ -830,6 +830,19 @@ void blk_queue_flush_queueable(struct request_queue *q, bool queueable)
 	spin_unlock_irq(q->queue_lock);
 }
 EXPORT_SYMBOL_GPL(blk_queue_flush_queueable);
+
+/**
+ * blk_set_queue_depth - tell the block layer about the device queue depth
+ * @q:          the request queue for the device
+ * @depth:      queue depth
+ *
+ */
+void blk_set_queue_depth(struct request_queue *q, unsigned int depth)
+{
+	q->queue_depth = depth;
+	wbt_set_queue_depth(q->rq_wb, depth);
+}
+EXPORT_SYMBOL(blk_set_queue_depth);
 
 /**
  * blk_queue_write_cache - configure queue's write cache
